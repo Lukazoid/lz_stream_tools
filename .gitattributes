@@ -1,0 +1,13 @@
+# automatically handle text files
+* text=auto
+
+# text files
+*.md text
+*.txt text
+
+# source code files
+*.rs text
+
+# configuration files
+*.yml text
+*.toml text

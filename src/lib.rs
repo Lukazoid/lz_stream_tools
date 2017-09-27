@@ -11,7 +11,10 @@ struct GroupByState<K, S, F>
 {
     stream: S,
     callback: F,
-    pending_items: Vec<VecDeque<S::Item>>,
+
+    // The pending items of each group, this will map to None if the group has been dropped
+    pending_items: Vec<Option<VecDeque<S::Item>>>,
+        
     group_indices: HashMap<K, usize>,
     pending_groups: Vec<Result<(K, Group<K, S, F>), S::Error>>,
 }
@@ -26,8 +29,15 @@ fn poll_next_group_item<K, S, F>(shared_state: &mut Arc<Mutex<GroupByState<K, S,
     let mut state = shared_state.lock().unwrap();
 
     // Pop an item pending for this group
-    if let Some(item) = state.pending_items[index].pop_front() {
-        return Ok(Async::Ready(Some(item)));
+    match state.pending_items[index] {
+        Some(ref mut pending_items) => {
+            if let Some(item) = pending_items.pop_front() {
+                return Ok(Async::Ready(Some(item)));
+            }
+        }
+        None => {
+            unreachable!("attempting to get the next group item for a dropped group");
+        }
     }
 
     // Loop until we find an item for this group or the end of the stream
@@ -44,7 +54,15 @@ fn poll_next_group_item<K, S, F>(shared_state: &mut Arc<Mutex<GroupByState<K, S,
                     }
                     Some(existing_index) => {
                         // Found an item for another group
-                        state.pending_items[existing_index].push_back(item);
+                        match state.pending_items.get_mut(existing_index).map(|x| x.as_mut()) {
+                            Some(Some(pending_items)) => {
+                                pending_items.push_back(item);
+                            }
+                            Some(None) => {
+                                // Found an item for a dropped group
+                            },
+                            None => unreachable!("there should always be a pending_items entry for each group")
+                        };
                         continue;
                     }
                     None => {
@@ -54,7 +72,7 @@ fn poll_next_group_item<K, S, F>(shared_state: &mut Arc<Mutex<GroupByState<K, S,
                         let mut group_pending_items = VecDeque::new();
                         group_pending_items.push_back(item);
 
-                        state.pending_items.push(group_pending_items);
+                        state.pending_items.push(Some(group_pending_items));
                         state.group_indices.insert(key.clone(), index);
 
                         let group = Group {
@@ -101,28 +119,33 @@ fn poll_next_group<K, S, F>(shared_state: &mut Arc<Mutex<GroupByState<K, S, F>>>
             None => return Ok(Async::Ready(None)),
             Some(item) => {
                 let key = (&mut state.callback)(&item);
-                if let Some(existing_index) = state.group_indices.get(&key).map(|x| *x) {
-                    // Found an existing group, add this item to its list of pending
-                    state.pending_items[existing_index].push_back(item);
+                match  state.group_indices.get(&key).map(|x| *x) {
+                    Some(existing_index) => {
+                        // Found an existing group, add this item to its list of pending
+                        if let Some(ref mut pending_items) = state.pending_items[existing_index] {
+                            pending_items.push_back(item);
+                        }
 
-                    // We already have a group for this key keep looping until we find the next group
-                    continue;
+                        // We already have a group for this key keep looping until we find the next group
+                        continue;
 
-                } else {
-                    // Found an item for a new group
-                    let index = state.pending_items.len();
-                    let mut group_pending_items = VecDeque::new();
-                    group_pending_items.push_back(item);
+                    },
+                    _ => {
+                        // Found an item for a new group
+                        let index = state.pending_items.len();
+                        let mut group_pending_items = VecDeque::new();
+                        group_pending_items.push_back(item);
 
-                    state.pending_items.push(group_pending_items);
+                        state.pending_items.push(Some(group_pending_items));
 
-                    state.group_indices.insert(key.clone(), index);
+                        state.group_indices.insert(key.clone(), index);
 
-                    let group = Group {
-                        index: index,
-                        state: shared_state.clone(),
-                    };
-                    return Ok(Async::Ready(Some((key, group))));
+                        let group = Group {
+                            index: index,
+                            state: shared_state.clone(),
+                        };
+                        return Ok(Async::Ready(Some((key, group))));
+                    }
                 }
             }
         };
@@ -140,6 +163,14 @@ pub struct Group<K, S, F>
 {
     index: usize,
     state: Arc<Mutex<GroupByState<K, S, F>>>,
+}
+
+impl<K, S: Stream, F> Drop for Group<K, S, F> {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap();
+
+        state.pending_items[self.index] = None;
+    }
 }
 
 impl<K, S, F> Stream for Group<K, S, F>
@@ -196,8 +227,8 @@ mod tests {
 
     #[test]
     fn group_by_returns_each_group() {
-        let results: Vec<Result<_, ()>> = vec![Ok("A"), Ok("AB"), Ok("C"), Ok("ABC")];
-        let stream = stream::iter(results);
+        let results = vec!["A", "AB", "C", "ABC"];
+        let stream = stream::iter_ok::<_, ()>(results);
         let group_by = stream.group_by(|s| s.len());
 
         let group_keys: Vec<_> = group_by.map(|(k, _)| k)
@@ -210,8 +241,8 @@ mod tests {
 
     #[test]
     fn groups_return_correct_items() {
-        let results: Vec<Result<_, ()>> = vec![Ok("A"), Ok("AB"), Ok("C"), Ok("ABC")];
-        let stream = stream::iter(results);
+        let results = vec!["A", "AB", "C", "ABC"];
+        let stream = stream::iter_ok::<_, ()>(results);
         let group_by = stream.group_by(|s| s.len());
 
         let mut groups: Vec<_> = group_by.map(|(_, g)| g)

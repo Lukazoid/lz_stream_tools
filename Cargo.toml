@@ -4,4 +4,4 @@ version = "0.1.0"
 authors = ["Luke Horsley <luke.horsley@offset1337.co.uk>"]
 
 [dependencies]
-futures = "0.1.13"
+futures = "0.1.16"

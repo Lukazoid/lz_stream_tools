@@ -13,6 +13,9 @@ pub use latest::Latest;
 mod enumerate;
 pub use enumerate::Enumerate;
 
+mod with_latest_from;
+pub use with_latest_from::WithLatestFrom;
+
 pub trait StreamTools: Stream {
     fn group_by<K, F>(self, f: F) -> GroupBy<K, Self, F>
     where
@@ -35,6 +38,15 @@ pub trait StreamTools: Stream {
         Self: Sized,
     {
         Enumerate::new(self)
+    }
+
+    fn with_latest_from<S>(self, other: S) -> WithLatestFrom<Self, S>
+    where
+        Self: Sized,
+        S: Stream<Error = Self::Error>,
+        S::Item: Clone,
+    {
+        WithLatestFrom::new(self, other)
     }
 }
 
@@ -128,4 +140,41 @@ mod tests {
 
         assert_eq!(items, vec![1, 3, 5]);
     }
+
+    #[test]
+    fn with_latest_returns_latest() {
+        let (tx_main, rx_main) = mpsc::unbounded();
+        let (tx, rx) = mpsc::unbounded();
+
+        let rx_thread = thread::spawn(move|| rx_main.with_latest_from(rx)
+            .collect()
+            .wait()
+            .unwrap());
+
+        let tx_thread = thread::spawn(move || {
+            tx_main.unbounded_send(0).unwrap();
+
+            thread::sleep(Duration::from_millis(50));
+            tx.unbounded_send("A").unwrap();
+
+            tx_main.unbounded_send(1).unwrap();
+
+            thread::sleep(Duration::from_millis(50));
+            tx.unbounded_send("B").unwrap();
+
+            thread::sleep(Duration::from_millis(50));
+            tx.unbounded_send("C").unwrap();
+
+            tx_main.unbounded_send(2).unwrap();
+        });
+
+        let items = rx_thread.join().unwrap();
+        tx_thread.join().unwrap();
+
+        assert_eq!(items, vec![(1, "A"), (2, "C")]);
+    }
+    
+
+    
+
 }

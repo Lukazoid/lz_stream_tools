@@ -10,6 +10,9 @@ pub use group_by::{Group, GroupBy};
 mod latest;
 pub use latest::Latest;
 
+mod enumerate;
+pub use enumerate::Enumerate;
+
 pub trait StreamTools: Stream {
     fn group_by<K, F>(self, f: F) -> GroupBy<K, Self, F>
     where
@@ -25,6 +28,13 @@ pub trait StreamTools: Stream {
         Self: Sized,
     {
         Latest::new(self)
+    }
+
+    fn enumerate(self) -> Enumerate<Self>
+    where
+        Self: Sized,
+    {
+        Enumerate::new(self)
     }
 }
 

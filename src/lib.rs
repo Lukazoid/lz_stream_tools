@@ -7,6 +7,9 @@ use std::hash::Hash;
 mod group_by;
 pub use group_by::{Group, GroupBy};
 
+mod latest;
+pub use latest::Latest;
+
 pub trait StreamTools: Stream {
     fn group_by<K, F>(self, f: F) -> GroupBy<K, Self, F>
     where
@@ -15,6 +18,13 @@ pub trait StreamTools: Stream {
         Self: Sized,
     {
         GroupBy::new(self, f)
+    }
+
+    fn latest(self) -> Latest<Self>
+    where
+        Self: Sized,
+    {
+        Latest::new(self)
     }
 }
 
@@ -25,6 +35,9 @@ mod tests {
     use super::*;
     use futures::{Future, Stream};
     use futures::stream;
+    use futures::sync::mpsc;
+    use std::time::Duration;
+    use std::thread;
 
     #[test]
     fn group_by_returns_each_group() {
@@ -76,5 +89,33 @@ mod tests {
             .expect("there should be no error reading items from the group");
 
         assert_eq!(third_items, vec!["ABC"]);
+    }
+
+    #[test]
+    fn latest_returns_latest() {
+        let (tx, rx) = mpsc::unbounded();
+
+        let rx_thread = thread::spawn(move|| rx
+            .map(|x| stream::iter_ok::<_, ()>(x))
+            .flatten()
+            .latest()
+            .collect()
+            .wait()
+            .unwrap());
+
+        let tx_thread = thread::spawn(move || {
+            tx.unbounded_send(vec![0, 1]).unwrap();
+
+            thread::sleep(Duration::from_millis(50));
+            tx.unbounded_send(vec![2, 3]).unwrap();
+
+            thread::sleep(Duration::from_millis(50));
+            tx.unbounded_send(vec![4, 5]).unwrap();
+        });
+
+        let items = rx_thread.join().unwrap();
+        tx_thread.join().unwrap();
+
+        assert_eq!(items, vec![1, 3, 5]);
     }
 }
